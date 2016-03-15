@@ -1,0 +1,184 @@
+DECLARE @startdate DATETIME = '2016-01-01'
+DECLARE @enddate DATETIME = '2016-01-31';
+
+WITH APPStarts AS 
+(
+	SELECT 
+	MAX(CAST(dateCreated AS DATE)) AS LastAppStartDate
+	,userId
+	,productId
+	FROM 
+	CDS.castatistics.StartApp WITH (NOLOCK)
+	GROUP BY
+	userId
+	,productId
+)
+,
+
+Installatons AS 
+(
+	SELECT 
+	DATEADD(MONTH,DATEDIFF(MONTH,0,afp_dateCreated),0) InstallMonth
+	,i.userid
+	,i.productid
+	,DATEDIFF(DAY,afp_dateCreated, ap.LastAppStartDate) AS DropoffDate
+	FROM Analytics.mobile.install i WITH (NOLOCK)
+	LEFT JOIN APPStarts ap 
+		ON i.userid = ap.userId AND i.productid = ap.productId
+	WHERE i.afp_dateCreated >= @startdate
+)
+,
+
+Startdata AS 
+(
+	SELECT 
+	MIN(monat) AS Monat
+	,userid
+	,productid
+	FROM Analytics.mobile.usersegmentation WITH (NOLOCK)
+	GROUP BY 
+	userid
+	,productid
+)
+,
+
+Brochureclicks AS 
+(
+	SELECT 
+	(DATEADD(MONTH,DATEDIFF(MONTH,0,bc.date_created),0)) AS DateCreated
+	,user_ident
+	,publisher_id
+	,p.name
+	,COUNT(*) AS Brochureclicks
+	,ROW_NUMBER() OVER(PARTITION BY user_ident ORDER BY  MIN(DATEADD(MONTH,DATEDIFF(MONTH,0,bc.date_created),0)) ASC, COUNT(*) DESC) AS rnk
+	FROM 
+	CDS.tracking_2011.brochure_click bc WITH (NOLOCK)
+	LEFT JOIN cds.portal_2011.publisher p WITH (NOLOCK) ON bc. publisher_id= p.id
+	WHERE visit_origin_type in ('MOBILE_ANDROID','MOBILE_ANDROID_WATCHER','MOBILE_IPAD',
+	'MOBILE_IPAD_WATCHER','MOBILE_IPHONE','MOBILE_IPHONE_WATCHER','MOBILE_MOBILE_SAMSUNG',
+	'MOBILE_MOBILE_SAMSUNG_WATCHER','MOBILE_TABLET_ANDROID','MOBILE_TABLET_ANDROID_WATCHER',
+	'MOBILE_TABLET_SAMSUNG','MOBILE_TABLET_SAMSUNG_WATCHER','MOBILE_BLACKBERRY_ANDROID')	
+	AND bc.date_created BETWEEN @startdate AND CONVERT(DATETIME2(7),@enddate + ' 23:59:59.997')
+	--AND bc.user_ident = '0026ca2f-63ad-4d4f-b89c-5c8357917d8e'
+	GROUP BY
+	DATEADD(MONTH,DATEDIFF(MONTH,0,bc.date_created),0)
+	,user_ident
+	,publisher_id
+	,p.name
+)
+,
+
+CompResults AS 
+(
+	SELECT
+	st.Monat
+	,st.userid
+	,st.productid
+	,COALESCE(us.AddedTicker,0) AS AddedTicker
+	,COALESCE(us.Activeticker,0) AS Activeticker
+	,COALESCE(us.Appstarts,0) AS Appstarts
+	,COALESCE(us.BrochureViews,0) AS BrochureViews
+	,us.GruppierungAppstarts
+	,us.GruppierungBv
+	,COALESCE(ins.Dropoffdate,0) AS DropOffDateNumber
+	,bc.name AS TopPublisher
+	,bc.Brochureclicks AS TopPublisherBrochureClicks
+	FROM 
+	Startdata st
+	INNER JOIN Analytics.mobile.usersegmentation us WITH (NOLOCK) ON st.Monat = us.monat AND st.userid = us.userid and st.productid = us.productid
+	LEFT JOIN Installatons ins ON st.Monat = ins.InstallMonth AND st.userid = ins.userid AND st.productid = ins.productid
+	LEFT JOIN Brochureclicks bc ON st.Monat = bc.DateCreated AND st.userId = bc.user_ident AND bc.rnk = 1
+	WHERE st.Monat BETWEEN @startdate AND @enddate --AND  st.userId = '094f9635-c463-4cef-adfb-88232bc5d1ce' 
+)
+, 
+
+Favorites AS 
+(
+	SELECT DISTINCT
+	p.name
+	,device_id
+	FROM 
+	CDS.portal_2011.watcher w
+	LEFT JOIN cds.portal_2011.publisher p ON w.retailer_id= p.retailer_id 
+	WHERE device_id IS NOT null and w.retailer_id is not null 
+	AND w.date_created BETWEEN @startdate AND CONVERT(DATETIME2(7),@enddate + ' 23:59:59.997')  --AND device_id = '094f9635-c463-4cef-adfb-88232bc5d1ce' 
+
+)
+,
+
+publisherdata AS 
+(
+	SELECT 
+	p1.id as publisherid
+	,s.id as sectorid
+	FROM
+	cds.portal_2011.publisher p1 
+	LEFT JOIN cds.portal_2011.retailer r ON p1.retailer_id = r.id
+	LEFT JOIN cds.portal_2011.sector s ON r.sector_id = s.id
+)
+,
+
+sectordata AS 
+( 
+	SELECT
+	bc.user_ident
+	,count(DISTINCT pd.sectorid) as sectorcount
+	FROM 
+	cds.tracking_2011.brochure_click bc WITH (NOLOCK)
+	LEFT JOIN publisherdata pd ON bc.publisher_id = pd.publisherid
+	WHERE cast(bc.date_created as date)  BETWEEN @startdate AND CONVERT(DATETIME2(7),@enddate + ' 23:59:59.997') 
+
+	AND visit_origin_type in ('MOBILE_ANDROID','MOBILE_ANDROID_WATCHER','MOBILE_IPAD',
+	'MOBILE_IPAD_WATCHER','MOBILE_IPHONE','MOBILE_IPHONE_WATCHER','MOBILE_MOBILE_SAMSUNG',
+	'MOBILE_MOBILE_SAMSUNG_WATCHER','MOBILE_TABLET_ANDROID','MOBILE_TABLET_ANDROID_WATCHER',
+	'MOBILE_TABLET_SAMSUNG','MOBILE_TABLET_SAMSUNG_WATCHER','MOBILE_BLACKBERRY_ANDROID')	
+
+	GROUP BY 
+	bc.user_ident
+)
+,
+
+zipcodes AS
+(
+	SELECT 
+	user_ident
+	,user_zip
+	,ROW_NUMBER() OVER(PARTITION BY	user_ident ORDER BY count(*) DESC) as rnk
+	FROM 
+	CDS.tracking_2011.brochure_click bc WITH (NOLOCK)
+	WHERE visit_origin_type IN ('MOBILE_ANDROID','MOBILE_ANDROID_WATCHER','MOBILE_IPAD',
+	'MOBILE_IPAD_WATCHER','MOBILE_IPHONE','MOBILE_IPHONE_WATCHER','MOBILE_MOBILE_SAMSUNG',
+	'MOBILE_MOBILE_SAMSUNG_WATCHER','MOBILE_TABLET_ANDROID','MOBILE_TABLET_ANDROID_WATCHER',
+	'MOBILE_TABLET_SAMSUNG','MOBILE_TABLET_SAMSUNG_WATCHER','MOBILE_BLACKBERRY_ANDROID')	
+	AND bc.date_created BETWEEN @startdate AND CONVERT(DATETIME2(7),@enddate + ' 23:59:59.997')
+	--and user_ident = '002ebd6e-2c5c-4bc3-9a64-1fe1f3a87fb5'
+	GROUP BY 
+	user_ident
+	,user_zip
+)
+
+SELECT 
+Monat
+,userid
+,productid
+,AddedTicker
+,Activeticker
+,Appstarts
+,BrochureViews
+,GruppierungAppstarts
+,GruppierungBv
+,DropOffDateNumber
+,replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(REPLACE(cast(lower(TopPublisher) as nvarchar(max)),'ö','o'),'ü','u'),'ä','a'),'ß','ss'),'"',''),'@',' at '),'&',' and '),'’',' '),'+',' plus '),'.',' '),'ë','e') TopPublisher
+,TopPublisherBrochureClicks
+,sc.sectorcount
+,IIF(f.name IS NOT NULL, 1, 0) AS FlagFavoriteRetailer
+,[lat]
+,[lng]
+,replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(REPLACE(cast(lower(federal_state) as nvarchar(max)),'ö','o'),'ü','u'),'ä','a'),'ß','ss'),'"',''),'@',' at '),'&',' and '),'’',' '),'+',' plus '),'.',' '),'ë','e') federal_state
+FROM 
+CompResults c
+LEFT JOIN Favorites f ON c.userid = f.device_id AND c.TopPublisher = f.name
+LEFT JOIN sectordata sc ON c.userid = sc.user_ident
+LEFT JOIN zipcodes zd ON c.userid = zd.user_ident AND zd.rnk = 1
+Left Join analytics.[Geographic].[zips] zs on zd.user_zip = zs.code
+WHERE GruppierungBV = '3. Infrequent User' --and userid = '094f9635-c463-4cef-adfb-88232bc5d1ce'
